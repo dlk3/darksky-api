@@ -6,9 +6,10 @@ import datetime
 import concurrent.futures
 import sys
 
-#  isodate may be available in distro packages, or may need to be
+#  These may be available in distro packages, or may need to be
 #  installed with pip
 import isodate
+import pytz
 
 #  Astral v2.1 is used to calculate moon phase.  It probably needs to be
 #  installed with pip, the distro packaged version may not be up to date.
@@ -123,13 +124,13 @@ def _mapClimacellWeatherCode(code):
 			print('Could not find "{}" in the Climacell weather codes list'.format(code))
 	return ''
 
-def epochTime(dt_str):
+def _epochTime(dt_str):
 	'''
 	Convert Climacell date string to UNIX epoch timestamp
 	'''
 	return int(datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=datetime.timezone.utc).timestamp())
 	
-def dailyEpochTime(dt_str):
+def _dailyEpochTime(dt_str):
 	'''
 	Convert Climacell daily date string to UNIX epoch timestamp
 	'''
@@ -247,12 +248,17 @@ def get(latitude, longitude, apikey, input_dictionary=None, flask_app=None):
 			}
 		}
 
+		#  Calculate the timezone's offset from UTC in hours and add that
+		#  to the output
+		tz_now = datetime.datetime.now(pytz.timezone(output['timezone']))
+		output['offset'] = tz_now.utcoffset().total_seconds() / 3600
+
 	#--------------------------   C u r r e n t l y   --------------------------#
 
 	#  Populate the output dictionary with the current observations
 	if cc_current_obj:
 		output['currently'] = {
-			'time': functions.getKeyValue(cc_current_obj, ['observation_time', 'value'], lambda x: int(epochTime(x))),
+			'time': functions.getKeyValue(cc_current_obj, ['observation_time', 'value'], lambda x: int(_epochTime(x))),
 			'summary': functions.getKeyValue(cc_current_obj, ['weather_code', 'value'], lambda x: _mapClimacellWeatherCode(x)),
 			'icon': functions.getKeyValue(cc_current_obj, ['weather_code', 'value'], lambda x: _mapIcons(x, flask_app)),
 			#'nearestStormDistance': None,
@@ -286,7 +292,7 @@ def get(latitude, longitude, apikey, input_dictionary=None, flask_app=None):
 			minutely_data = []
 			for minute in cc_minutely_obj:
 				minutely_data.append({
-					'time': epochTime(minute['observation_time']['value']),
+					'time': _epochTime(minute['observation_time']['value']),
 					'precipIntensity': functions.getKeyValue(minute, ['precipitation', 'value']),
 					#  Climacell doesn't provide these next two elements
 					#  in their minute-by-minute forecast
@@ -321,7 +327,7 @@ def get(latitude, longitude, apikey, input_dictionary=None, flask_app=None):
 		for i in range(len(hourly_data)):
 			hour = hourly_data[i]
 			cc_hour = cc_hourly_obj[i]
-			if hour['time'] == epochTime(cc_hour['observation_time']['value']):
+			if hour['time'] == _epochTime(cc_hour['observation_time']['value']):
 				hourly_data[i] = {
 					'time': hour['time'],
 					'summary': functions.getKeyValue(cc_hour, ['weather_code', 'value'], lambda x: _mapClimacellWeatherCode(x)),
@@ -385,7 +391,7 @@ def get(latitude, longitude, apikey, input_dictionary=None, flask_app=None):
 		#  Align the dates in the two arrays
 		ctr = 0
 		for i in range(len(cc_daily_obj)):
-			if dailyEpochTime(cc_daily_obj[ctr]['observation_time']['value']) < daily_data[0]['time']:
+			if _dailyEpochTime(cc_daily_obj[ctr]['observation_time']['value']) < daily_data[0]['time']:
 				ctr = ctr + 1
 				
 		#  Update the data for each day
@@ -505,9 +511,9 @@ def get(latitude, longitude, apikey, input_dictionary=None, flask_app=None):
 	#-----------------------------   A l e r t s   -----------------------------#
 	
 	'''
-	Climacell does not provide their alerts service to free accounts.
-	If the input data structure included alerts, those are passed
-	through untouched.
+	Climacell's alerts are a proprietary messaging system, not weather
+	alerts. If the input data structure included NOAA weather alerts,
+	those will be passed through untouched.
 	'''
 
 	#  Add a source flag for this source

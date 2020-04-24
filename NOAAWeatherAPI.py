@@ -114,7 +114,7 @@ def _mapIcons(icon, flask_app=None):
 
 	return ''
 
-def dailyEpochTime(dt_str):
+def _dailyEpochTime(dt_str):
 	'''
 	Convert NOAA daily date string to UNIX epoch timestamp.  This ignores
 	the time portion of the string and returns the timestamp as it would
@@ -496,7 +496,7 @@ def get(latitude, longitude, useragent_string, flask_app=None):
 	
 	#  Build an array to hold the daily forecasts
 	for i in range(len(periods)):
-		if dailyEpochTime(periods[i]['startTime']) == timestamp:
+		if _dailyEpochTime(periods[i]['startTime']) == timestamp:
 			the_sun = sun(astral_location.observer, date=datetime.datetime.utcfromtimestamp(timestamp))
 			daily_data.append({
 				'time': timestamp,
@@ -737,8 +737,7 @@ def get(latitude, longitude, useragent_string, flask_app=None):
 	#-----------------------------   A l e r t s   -----------------------------#
 
 	#  Popluate the output dictionary with any alerts that pertain to
-	#  this location.  If there are none, delete the "alerts" key from
-	#  the output dictionary.
+	#  this location.
 	if noaa_alerts_obj:
 		alerts = functions.getKeyValue(noaa_alerts_obj, ['features'])
 		if alerts:

@@ -25,7 +25,7 @@ For more information on these APIs, see:
 - [NOAA's Weather API Web Service](https://www.weather.gov/documentation/services-web-api)
 - [Climacell's MicroWeather API](https://www.climacell.co/weather-api/docs/)
 
-###Installation
+### Installation
 
 This script is written for Python version 3.  It uses the Astral module whose RPM package is out of date on Fedora 31 where I work.  It also uses the timezonefinder module which is not packaged for Fedora.  Therefore I chose to run this service in a Python virtual environment where I can install modules at will without affecting the rest of my system.  Here's the one-time setup procedure I used to create that virtual environment, with the necessary modules installed, in the home directory of my regular userid:
 
@@ -57,7 +57,7 @@ The application will log messages into a darksky-api.log file in the current dir
 
 The [Flask documentation](https://flask.palletsprojects.com/en/1.1.x/deploying/#deployment) discusses the many options for deploying a Flask application in production.  I use the uWSGI service on CentOS 8.  This repository includes the ini configuration files that I use for this purpose.
 
-###License
+### License
 
 This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this

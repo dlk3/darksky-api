@@ -14,7 +14,7 @@ import isodate
 
 def getURL(url, headers=None, flask_app=None):
 	"""
-	Get the results of an API call to OpenWeatherMap or NOAA Weather APIs
+	Get the results of an API call to the NOAA or Climacell weather APIs
 	and handle any errors which might occur.
 	
 	url: a string
@@ -42,7 +42,7 @@ def getURL(url, headers=None, flask_app=None):
 def getKeyValue(dictionary_element, key_list, func=None):
 	"""
 	Returns a specific value from a dictionary array, in this case from
-	a JSON object returned from an OpenWeatherMap or NOAA Weather API call.
+	a JSON object returned from an NOAA or Climacell weather API call.
 	This function checks to be sure that each key in the key_list exists
 	before proceeding.  This is necessary because the APIs being used do
 	not always return all of the keys in their specifications.
@@ -82,11 +82,12 @@ def parseInterval(time_str, tz_string=None):
 	          duration specification, for example:
               2020-04-10T16:00:00-00:00/P6DT22H
 	          
-	Returns a dictionary array contain one or two timestamp elements.  If
-	a duration specification was part of the time_str provided then both a
-	"start" and	an "end" timestamp element will be returned, indicating
-	the start and end times of the duration.  If no duration was specified
-	in the time_str, then only a "start" timestamp element will be returned.
+	Returns a dictionary array containing one or two timestamp elements.
+	if a duration specification was part of the time_str provided then
+	both a "start" and an "end" timestamp element will be returned,
+	indicating the start and end times of the duration.  If no duration
+	was specified in the time_str, then only a "start" timestamp element
+	will be returned.
 	"""
 	interval = {}
 	split_time_str = time_str.split('/')
