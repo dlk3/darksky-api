@@ -1,0 +1,188 @@
+#!/usr/bin/env python
+
+import concurrent.futures
+import json
+import datetime
+import pytz
+
+import DarkskyAPIFunctions as functions
+
+#################################################################################
+
+#  Use function.parseInterval(dt_str)['start'] to get timestamps for
+#  current and hourly NOAA time strings
+#
+#def noaa_epochTime(dt_str):
+#	return
+
+def noaa_dailyEpochTime(dt_str):
+	'''
+	Convert NOAA daily date string to UNIX epoch timestamp.  This ignores
+	the time portion of the string and returns the timestamp as it would
+	have been at 00:00:00 on the date specified
+	'''
+	d = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S%z')
+	d = datetime.datetime.combine(datetime.date(d.year, d.month, d.day), datetime.time())
+	return int(d.timestamp())
+
+def cc_epochTime(dt_str):
+	'''
+	Convert Climacell date string to UNIX epoch timestamp
+	'''
+	return int(datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=datetime.timezone.utc).timestamp())
+	
+def cc_dailyEpochTime(dt_str):
+	'''
+	Convert Climacell daily date string to UNIX epoch timestamp
+	'''
+	return int(datetime.datetime.combine(datetime.datetime.strptime(dt_str, '%Y-%m-%d'), datetime.time()).timestamp())
+
+#################################################################################
+	
+latitude = '42.925455'
+longitude = '-85.604557'
+
+class color:
+	BOLD = '\033[1m'
+	END = '\033[0m'
+
+darksky_headers = {
+	'Accept': 'application/json'
+}
+darksky_apikey = "d925ca9a2aa239fe47e5db0c10556922";
+
+noaa_headers = {
+	'User-Agent': '(David King dave@daveking.com)',
+	'Accept': 'application/geo+json'
+}
+url = 'https://api.weather.gov/points/{},{}'.format(latitude, longitude)
+noaa_points_obj = functions.getURL(url, noaa_headers)
+url = functions.getKeyValue(noaa_points_obj, ['properties', 'observationStations']);
+noaa_stations_obj = functions.getURL(url, noaa_headers)
+
+cc_headers = {
+	'Accept': 'application/json',
+	'apikey': 'eWmpYOZO53kVzIA9IL6T1Sq1dOwRTfcl'
+}
+
+darkskyapi_apikey = 'eWmpYOZO53kVzIA9IL6T1Sq1dOwRTfcl'
+
+with concurrent.futures.ThreadPoolExecutor() as executor:
+	url = 'https://api.darksky.net/forecast/{}/{},{}'.format(darksky_apikey, latitude, longitude)
+	get_darksky = executor.submit(functions.getURL, url, headers=darksky_headers)
+
+	url = '{}/observations/latest'.format(noaa_stations_obj['features'][0]['id'])
+	get_current = executor.submit(functions.getURL, url, noaa_headers)
+	url = functions.getKeyValue(noaa_points_obj, ['properties', 'forecastHourly']);
+	get_hourly = executor.submit(functions.getURL, url, noaa_headers)
+	url = functions.getKeyValue(noaa_points_obj, ['properties', 'forecastGridData']);
+	get_griddata = executor.submit(functions.getURL, url, noaa_headers)
+	url = functions.getKeyValue(noaa_points_obj, ['properties', 'forecast']);
+	get_daily = executor.submit(functions.getURL, url, noaa_headers)
+
+	url = 'https://api.climacell.co/v3/weather/realtime?lat={}&lon={}&unit_system=us&fields=precipitation,precipitation%3Ain%2Fhr,precipitation_type,temp,feels_like,dewpoint,wind_speed,wind_gust,baro_pressure%3AhPa,visibility,humidity,wind_direction,cloud_cover,weather_code,o3'.format(latitude, longitude)
+	get_cc_current = executor.submit(functions.getURL, url, cc_headers)
+	url = 'https://api.climacell.co/v3/weather/forecast/hourly?lat={}&lon={}&unit_system=us&fields=precipitation,precipitation%3Ain%2Fhr,precipitation_type,precipitation_probability,temp,feels_like,dewpoint,wind_speed,wind_gust,baro_pressure%3AhPa,visibility,humidity,wind_direction,cloud_cover,weather_code,o3&start_time=now'.format(latitude, longitude)
+	get_cc_hourly = executor.submit(functions.getURL, url, cc_headers)
+	url = 'https://api.climacell.co/v3/weather/forecast/daily?lat={}&lon={}&start_time=now&unit_system=us&fields=temp,feels_like,wind_speed,wind_direction,baro_pressure%3AhPa,precipitation,precipitation%3Ain%2Fhr,precipitation_probability,visibility,humidity,sunrise,sunset,weather_code'.format(latitude, longitude)
+	get_cc_daily = executor.submit(functions.getURL, url, cc_headers)
+
+	url = 'http://fang.localdomain:5080/forecast/{}/{},{}'.format(darkskyapi_apikey, latitude, longitude)
+	get_darkskyapi = executor.submit(functions.getURL, url, darksky_headers)
+	
+	darksky_obj = get_darksky.result()
+	
+	noaa_current_obj = get_current.result()
+	noaa_hourly_obj = get_hourly.result()
+	noaa_griddata_obj = get_griddata.result()
+	noaa_daily_obj = get_daily.result()
+
+	cc_current_obj = get_cc_current.result()
+	cc_hourly_obj = get_cc_hourly.result()
+	cc_daily_obj = get_cc_daily.result()
+	
+	darkskyapi_obj = get_darkskyapi.result()
+	
+	tz = pytz.timezone(noaa_points_obj['properties']['timeZone'])
+
+times = {
+	'currently': {
+		'darksky': '>{}< {}'.format(darksky_obj['currently']['time'], tz.localize(datetime.datetime.fromtimestamp(darksky_obj['currently']['time'])).strftime('%Y-%m-%dT%H:%M:%S%z')),
+		'noaa': '{} >{}<'.format(functions.parseInterval(noaa_current_obj['properties']['timestamp'])['start'], noaa_current_obj['properties']['timestamp']) if noaa_current_obj else None,
+		'climacell': '{} >{}<'.format(cc_epochTime(cc_current_obj['observation_time']['value']), cc_current_obj['observation_time']['value']),
+		'darksky-api': '>{}< {}'.format(darkskyapi_obj['currently']['time'], tz.localize(datetime.datetime.fromtimestamp(darkskyapi_obj['currently']['time'])).strftime('%Y-%m-%dT%H:%M:%S%z')),
+	},
+	'hourly': [],
+	'daily': []
+}
+	
+ctr = 0
+for hour in darksky_obj['hourly']['data']:
+	times['hourly'].append({
+		'darksky': '>{}< {}'.format(hour['time'], tz.localize(datetime.datetime.fromtimestamp(hour['time'])).strftime('%Y-%m-%dT%H:%M:%S%z')),
+		'noaa_hourly': '{} >{}<'.format(functions.parseInterval(noaa_hourly_obj['properties']['periods'][ctr]['startTime'])['start'], noaa_hourly_obj['properties']['periods'][ctr]['startTime']) if noaa_current_obj else None,
+		'cc_hourly': '{} >{}<'.format(cc_epochTime(cc_hourly_obj[ctr]['observation_time']['value']), cc_hourly_obj[ctr]['observation_time']['value']) if ctr < len(cc_hourly_obj) else None,
+		'darksky-api': '>{}< {}'.format(darkskyapi_obj['hourly']['data'][ctr]['time'], tz.localize(datetime.datetime.fromtimestamp(darkskyapi_obj['hourly']['data'][ctr]['time'])).strftime('%Y-%m-%dT%H:%M:%S%z')) if ctr < len(darkskyapi_obj['hourly']['data']) else None,
+	})
+	ctr = ctr + 1
+
+if noaa_griddata_obj:
+	temp_times = []
+	for temp in noaa_griddata_obj['properties']['temperature']['values']:
+		interval = functions.parseInterval(temp['validTime'])
+		for timestamp in range(interval['start'], interval['end'], 3600):
+			temp_times.append('{} {}'.format(timestamp, temp['validTime']))
+	ctr = 0
+	go = False
+	for ts in temp_times:
+		if ctr == len(times['hourly']):
+			break
+		#print('{} ?= {}'.format(ts.split()[0], times['hourly'][ctr]['darksky'].split()[0]))
+		if not go and ts.split()[0] == times['hourly'][ctr]['darksky'].split()[0]:
+			print('ok go')
+			go = True
+			ctr = 0
+		if go:
+			times['hourly'][ctr]['noaa_griddata'] = ts
+			ctr = ctr + 1
+
+
+noaa_daily_times = []
+if noaa_daily_obj:
+	days  = noaa_daily_obj['properties']['periods']
+	first = True
+	for i in range(len(days)):
+		if days[i]['isDaytime']:
+			noaa_daily_times.append(days[i]['startTime'])
+			first = False
+		elif first:
+			if not days[i]['isDaytime'] and noaa_dailyEpochTime(days[i]['startTime']) != noaa_dailyEpochTime(days[i+1]['startTime']):
+				noaa_daily_times.append(days[i]['startTime'])
+				first = False
+		
+ctr = 0
+cc_ctr = 0
+for day in darksky_obj['daily']['data']:
+	for i in range(len(cc_daily_obj)):
+		if cc_dailyEpochTime(cc_daily_obj[cc_ctr]['observation_time']['value']) < day['time']:
+			cc_ctr = cc_ctr + 1
+	times['daily'].append({
+		'darksky': '>{}< {}'.format(day['time'], tz.localize(datetime.datetime.fromtimestamp(day['time'])).strftime('%Y-%m-%dT%H:%M:%S%z')),
+		'noaa_daily': '{} >{}<'.format(noaa_dailyEpochTime(noaa_daily_times[ctr]), noaa_daily_times[ctr]) if ctr < len(noaa_daily_times) else None,
+		'cc_daily': '{} >{}<'.format(cc_dailyEpochTime(cc_daily_obj[cc_ctr]['observation_time']['value']), cc_daily_obj[cc_ctr]['observation_time']['value']) if cc_ctr < len(cc_daily_obj) else None,
+		'darksky-api': '>{}< {}'.format(darkskyapi_obj['daily']['data'][ctr]['time'], tz.localize(datetime.datetime.fromtimestamp(darkskyapi_obj['daily']['data'][ctr]['time'])).strftime('%Y-%m-%dT%H:%M:%S%z')) if ctr < len(darkskyapi_obj['daily']['data']) else None,
+	})
+	ctr = ctr + 1
+	cc_ctr = cc_ctr + 1
+	
+#print(json.dumps(darksky_obj, indent=4))
+#print(json.dumps(noaa_current_obj, indent=4))
+#print(json.dumps(noaa_hourly_obj, indent=4))
+print(json.dumps(noaa_griddata_obj, indent=4))
+#print(json.dumps(noaa_daily_obj, indent=4))
+#print(json.dumps(cc_current_obj, indent=4))
+#print(json.dumps(cc_hourly_obj, indent=4))
+#print(json.dumps(cc_daily_obj, indent=4))
+#print(json.dumps(darkskyapi_obj, indent=4))
+	
+#print(json.dumps(times, indent=4))

@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+
+CURRDIR=`pwd`
+cd ${HOME}/src/darksky-api
+source ${HOME}/darksky-api-venv/bin/activate
+export FLASK_ENV=development
+export FLASK_APP=darksky-api.py
+flask run
+deactivate
+cd $CURRDIR

@@ -1,0 +1,64 @@
+{
+  "lat": 42.925455,
+  "lon": -85.604557,
+  "temp": {
+    "value": 31.1,
+    "units": "F"
+  },
+  "feels_like": {
+    "value": 21.16,
+    "units": "F"
+  },
+  "dewpoint": {
+    "value": 23.34,
+    "units": "F"
+  },
+  "wind_speed": {
+    "value": 13.14,
+    "units": "mph"
+  },
+  "wind_gust": {
+    "value": 22.79,
+    "units": "mph"
+  },
+  "baro_pressure": {
+    "value": 1020.1875,
+    "units": "hPa"
+  },
+  "visibility": {
+    "value": 6.21371,
+    "units": "mi"
+  },
+  "humidity": {
+    "value": 72.5,
+    "units": "%"
+  },
+  "wind_direction": {
+    "value": 253.88,
+    "units": "degrees"
+  },
+  "precipitation": {
+    "value": 0,
+    "units": "in/hr"
+  },
+  "precipitation_type": {
+    "value": "none"
+  },
+  "cloud_cover": {
+    "value": 17.13,
+    "units": "%"
+  },
+  "moon_phase": {
+    "value": "last_quarter"
+  },
+  "weather_code": {
+    "value": "mostly_clear"
+  },
+  "o3": {
+    "value": 29,
+    "units": "ppb"
+  },
+  "observation_time": {
+    "value": "2020-04-14T12:10:54.057Z"
+  }
+}

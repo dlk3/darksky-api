@@ -1,0 +1,695 @@
+#!/usr/bin/env python
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+import requests
+import json
+import time
+import datetime
+import pytz
+from geopy.distance import great_circle
+import isodate
+import configparser
+import optparse
+import os
+import re
+
+#################################################################################
+#                               F u n c t i o n s                               #
+#################################################################################
+	
+def getURL(url, headers=None):
+	"""
+	Get the results of an API call to OpenWeatherMap or NOAA Weather APIs
+	and handle any errors which might occur.
+	
+	url: a string
+	headers: a "requests"-style dictionary array of header names and values
+	
+	Returns a JSON object or "False" if an error occurred
+	"""
+	response = requests.get(url, headers=headers)
+	if response.status_code == 200:
+		return response.json()
+	else:
+		print('{} failed to get:'.format(url))
+		print('[{}]: {}'.format(response.status_code, response.text))
+		return False
+
+def getKeyValue(dictionary_element, key_list, func=None):
+	"""
+	Returns a specific value from a dictionary array, in this case from
+	a JSON object returned from an OpenWeatherMap or NOAA Weather API call.
+	This function checks to be sure that each key in the key_list exists
+	before proceeding.  This is necessary because the APIs being used do
+	not always return all of the keys in their specifications.
+	
+	dictionary: the dictionary array
+	key_list:   an array of keys that lead down from the top level of the
+	            array down to the actual element that is to be returned.
+	func:       a function that it to be applied to the value before it
+	            is returned.  Mainly intended to be used for rounding or
+	            for units conversions.
+
+	Returns the value of the specified dictionary element or "None" if that
+	element does not exist.
+	"""
+	for key in key_list:
+		if isinstance(key, int):
+			if key < len(dictionary_element):
+				dictionary_element = dictionary_element[key]
+			else:
+				return None
+		else:
+			if key in dictionary_element:
+				dictionary_element = dictionary_element[key]
+			else:
+				return None
+	if dictionary_element and func:
+		return func(dictionary_element)
+	else:
+		return dictionary_element
+
+def mapPrecipType(weather_id):
+	"""
+	Convert OpenWeatherMap weather ids to DarkSky precipType
+	
+	weather_id:  the OpenWeatherMap id code for weather type
+	
+	See https://openweathermap.org/weather-conditions#Weather-Condition-Codes-2
+	for a complete list of codes
+	"""
+	if isinstance(weather_id, int):
+		if weather_id >= 200 and weather_id < 600:
+			return 'rain'
+		if weather_id >= 600 and weather_id < 700:
+			if weather_id >= 611 and weather_id <= 613:
+				return 'sleet'
+			else:
+				return 'snow'
+	return None
+	 
+def mapIcons(icon):
+	"""
+	Convert OpenWeatherMap icon names to DarkSky icon names
+	
+	icon: the OpenWeatherMap icon name
+	
+	Returns a DarkSky icon name
+
+	The complete DarkSky icon set:
+		clear-day.png    
+		clear-night.png  
+		cloudy.png  
+		fog.png     
+		partly-cloudy-day.png    
+		partly-cloudy-night.png  
+		rain.png   
+		sleet.png  
+		snow.png
+		wind.png
+
+	See https://openweathermap.org/weather-conditions#How-to-get-icon-URL
+	for additional information
+	"""
+	openweathermap_icon_list = {
+		'01d': 'clear-day',
+		'02d': 'partly-cloudy-day',
+		'03d': 'cloudy',
+		'04d': 'partly-cloudy-day',
+		'09d': 'rain',
+		'10d': 'rain',
+		'11d': 'rain',
+		'13d': 'snow',
+		'50d': 'fog',
+		'01n': 'clear-night',
+		'02n': 'partly-cloudy-night',
+		'03n': 'cloudy',
+		'04n': 'partly-cloudy-night',
+		'09n': 'rain',
+		'10n': 'rain',
+		'11n': 'rain',
+		'13n': 'snow',
+		'50n': 'fog'
+	};
+
+	if icon in openweathermap_icon_list:
+		return openweathermap_icon_list[icon]
+	else:
+		return icon;
+
+	'''
+	#  NOAA icon names aren't currntly used in this script so this is
+	#  here just in case I ever need to change things.
+	#  The list of NOAA icons is not complete.
+	noaa_icon_list = {
+		'/land/day/bkn': 'partly-cloudy-day',
+		'/land/day/few': 'clear-day',
+		'/land/day/fog': 'fog',
+		'/land/day/rain_showers': 'rain',
+		'/land/day/sct': 'partly-cloudy-day',
+		'/land/day/tsra': 'rain',
+		'/land/day/wind_bkn': 'wind',
+		'/land/day/wind_sct': 'wind',
+		'/land/night/bkn': 'partly-cloudy-night',
+		'/land/night/few': 'clear-night',
+		'/land/night/fog': 'fog',
+		'/land/night/rain_showers': 'rain',
+		'/land/night/sct': 'partly-cloudy-night',
+		'/land/night/tsra': 'rain',
+		'/land/night/wind_bkn': 'wind',
+		'/land/night/wind_sct': 'wind',
+	};
+
+	pattern = re.compile('(?<=icons/).*(?=\?)')
+	noaa_icon = re.search(pattern, icon)
+	if noaa_icon:
+		icon = noaa_icon[0]
+	if icon in noaa_icon_list:
+		return noaa_icon_list[icon]
+	else:
+		return icon
+	'''
+
+def parseInterval(time_str):
+	"""
+	Parse the ISO8601 date strings with interval/duration specs that NOAA
+	uses and return start and end UNIX timestamps for the interval
+	
+	time_str: an ISO8601-compliant time string, optionally including a
+	          duration specification, for example:
+              2020-04-10T16:00:00-00:00/P6DT22H
+	          
+	Returns a dictionary array contain one or two timestamp elements.  If
+	a duration specification was part of the time_str provided then both a
+	"start" and	an "end" timestamp element will be returned, indicating
+	the start and end times of the duration.  If no duration was specified
+	in the time_str, then only a "start" timestamp element will be returned.
+	"""
+	interval = {}
+	split_time_str = time_str.split('/')
+	start = isodate.parse_datetime(split_time_str[0])
+	interval['start'] = int(start.timestamp())
+	if len(split_time_str) == 2:
+		end = start + isodate.parse_duration(split_time_str[1])
+		interval['end'] = int(end.timestamp())
+	return interval
+
+def moon_phase(timestamp):
+	"""
+	timestamp: A UNIX timestamp
+	
+	Returns the phase of the moon on the date represented by the timestamp,
+	expressed as the percentage of light, i.e., the brightness of the
+	moon.  Percentages are returned as decimal fractions, i.e., 50% = .5.
+	
+	For example, a full moon would be 100% and this function would return 1.
+	"""
+	dt = datetime.datetime.utcfromtimestamp(timestamp)
+	month = dt.month
+	day = dt.day
+	year = dt.year
+	ages = [18, 0, 11, 22, 3, 14, 25, 6, 17, 28, 9, 20, 1, 12, 23, 4, 15, 26, 7]
+	offsets = [-1, 1, 0, 1, 2, 3, 4, 5, 7, 7, 9, 9]
+	if day == 31:
+		day = 1
+	days_into_phase = ((ages[(year + 1) % 19] + ((day + offsets[month-1]) % 30) +
+		(year < 1900)) % 30)
+	index = int((days_into_phase + 2) * 16/59.0)
+	if index > 7:
+		index = 7
+	light = int(2 * days_into_phase * 100/29)
+	if light > 100:
+		light = abs(light - 200);
+	return round(light / 100, 2)
+	
+#################################################################################
+#                           C o n f i g u r a t i o n                           #
+#################################################################################
+
+#  Make it possible to specify the name of a configuration file on the
+#  command line.  All other configuration parameters are set in that file.
+#  The default configuration file name is ~/darkspy-api.conf.  Also
+#  provide a "--quiet" option for silent running.
+usage = 'usage: %prog [-c|--config_file=configuration-file-name] [-q|--quiet]'
+description = 'A script that runs in a loop, consolidating weather data from multiple web services into a JSON file.'
+parser = optparse.OptionParser(usage=usage, description=description)
+parser.add_option('-c', '--config_file', dest='config_file', 
+	default=os.path.expanduser('~/darksky-api.conf'), 
+	help='Fully qualified path to the configuration file for this script.  The default is ~/darksky-api.conf.')
+parser.add_option('-q', '--quiet', dest='quiet', action='store_true',
+	default=False, help='Mute the console output from this script')
+(opts, args) = parser.parse_args()
+
+config_file = os.path.abspath(os.path.expanduser(opts.config_file))
+
+#  Set default configuration values
+output_file = '/tmp/darksky-api.json'
+update_delay = 300
+
+#  Get the configuration details from the configuration file
+try:
+	with open(config_file, 'r') as f:
+		dummy = ''
+except:
+	print('I cannot find your config file "{}".'.format(config_file))
+	exit(1)
+
+cfg = configparser.ConfigParser()
+cfg.read(config_file)
+if cfg.has_section('darksky-api'):
+	if cfg.has_option('darksky-api', 'openweathermap_api_key'):
+		openweathermap_api_key = cfg.get('darksky-api', 'openweathermap_api_key')
+	else:
+		print('Malformed config file "{}".  I don\'t see a "openweathermap_api_key" setting in the "darksy-api" section'.format(config_file));
+		exit(1)
+
+	if cfg.has_option('darksky-api', 'noaa_useragent_key'):
+		noaa_useragent_key = cfg.get('darksky-api', 'noaa_useragent_key')
+	else:
+		print('Malformed config file "{}".  I don\'t see a "noaa_useragent_key" setting in the "darksy-api" section'.format(config_file));
+		exit(1)
+
+	if cfg.has_option('darksky-api', 'latitude'):
+		latitude = cfg.get('darksky-api', 'latitude')
+	else:
+		print('Malformed config file "{}".  I don\'t see a "latitude" setting in the "darksy-api" section'.format(config_file));
+		exit(1)
+		
+	if cfg.has_option('darksky-api', 'longitude'):
+		longitude = cfg.get('darksky-api', 'longitude')
+	else:
+		print('Malformed config file "{}".  I don\'t see a "longitude" setting in the "darksy-api" section'.format(config_file));
+		exit(1)
+		
+	if cfg.has_option('darksky-api', 'output_file'):
+		output_file = cfg.get('darksky-api', 'output_file')
+
+	if cfg.has_option('darksky-api', 'update_delay'):
+		output_file = cfg.get('darksky-api', 'update_delay')
+else:
+	print('Malformed config file "{}".  I cannot find a "[darksky-api]" section in your configuration file.'.format(config_file))
+	exit(1)
+
+#  Check the configuration settings
+if openweathermap_api_key == '':
+	print('Malformed config file "{}".  The "openweathermap_api_key" setting in the "darksy-api" section is invalid'.format(config_file));
+	exit(1)
+if noaa_useragent_key == '':
+	print('Malformed config file "{}".  The "noaa_useragent_key" setting in the "darksy-api" section is invalid'.format(config_file));
+	exit(1)
+try:
+	latitude = float(latitude)
+except:
+	print('Malformed config file "{}".  The "latitude" setting in the "darksy-api" section is not a valid number'.format(config_file));
+	exit(1)
+if latitude < -90 or latitude > 90:
+	print('Malformed config file "{}".  The "latitude" setting in the "darksy-api" section is invalid'.format(config_file));
+	exit(1)
+try:
+	longitude = float(longitude)
+except:
+	print('Malformed config file "{}".  The "latitude" setting in the "darksy-api" section is not a valid number'.format(config_file));
+	exit(1)
+if longitude < -180 or longitude > 180:
+	print('Malformed config file "{}".  The "latitude" setting in the "darksy-api" section is invalid'.format(config_file));
+	exit(1)
+try:
+	output_file = os.path.abspath(os.path.expanduser(output_file))
+	with open(output_file, 'w') as f:
+		dummy = ''
+except:
+	print('Malformed config file "{}".  The "output_file" setting in the "darksy-api" section does not specify a valid, writeable file.'.format(config_file));
+	exit(1)
+try:
+	update_delay = int(update_delay)
+except:
+	print('Malformed config file "{}".  The "update_delay" setting in the "darksy-api" section is not a valid integer number'.format(config_file));
+	exit(1)
+
+#################################################################################
+#                              I n i t i a l i z e                              #
+#################################################################################
+
+#  Get the NOAA grid coordinates, timezone and URL links for this location
+noaa_headers = {
+	'User-Agent': noaa_useragent_key,
+	'Accept': 'application/geo+json'
+}
+url = 'https://api.weather.gov/points/{},{}'.format(latitude, longitude)
+noaa_points_obj = getURL(url, noaa_headers)
+if noaa_points_obj is False:
+	exit(1)
+
+#  Create an empty dictionary to hold our output
+output_template = {
+	'latitude': latitude,
+	'longitude': longitude,
+	'timezone': getKeyValue(noaa_points_obj, ['properties', 'timeZone']),
+	'currently': {},
+	'hourly': {
+		'summary': '',
+		'icon' : '',
+		'data': []
+	},
+	'daily': {
+		'summary': '',
+		'icon': '',
+		'data': []
+	},
+	'alerts': [],
+	'flags': {
+		'sources': ['noaa','openweathermap'],
+		'units': 'us'
+	}
+}
+#  Calculate the timezone's offset from UTC in hours and add that to the
+#  output_template
+tz_now = datetime.datetime.now(pytz.timezone(output_template['timezone']))
+output_template['offset'] = tz_now.utcoffset().total_seconds() / 3600
+
+#  Using the stations URL that we got from the NOAA points lookup, find
+#  the nearest station and get its dstance away.  Add this to the template.
+url = getKeyValue(noaa_points_obj, ['properties', 'observationStations']);
+noaa_stations_obj = getURL(url, headers=noaa_headers)
+if noaa_stations_obj is False:
+	exit(1)
+for feature in getKeyValue(noaa_stations_obj,['features']):
+	miles = great_circle((latitude, longitude), (getKeyValue(feature, ['geometry', 'coordinates'])[1], getKeyValue(feature, ['geometry', 'coordinates'])[0])).miles
+	if 'nearest-station' not in output_template['flags'] or miles < output_template['flags']['nearest-station']:
+		noaa_station_url = getKeyValue(feature, ['id'])
+		output_template['flags']['nearest-station'] = round(miles, 2)
+
+#  Get a list of all the counties in this location's state.  This is used
+#  when there are alerts.
+url = 'https://api.weather.gov/zones?type=county&area={}'.format(getKeyValue(noaa_points_obj, ['properties', 'relativeLocation', 'properties', 'state']))
+noaa_zones_obj = getURL(url)
+if noaa_zones_obj is False:
+	exit(1)
+noaa_county_list = {};
+for feature in getKeyValue(noaa_zones_obj, ['features']):
+	noaa_county_list[getKeyValue(feature, ['properties', 'id'])] = getKeyValue(feature, ['properties', 'name']);
+
+#  Append the list of forecast zones to the county list because sometimes
+#  they use these in alerts instead of county codes
+url = 'https://api.weather.gov/zones?type=forecast&area={}'.format(getKeyValue(noaa_points_obj, ['properties', 'relativeLocation', 'properties', 'state']))
+noaa_zones_obj = getURL(url)
+if noaa_zones_obj is False:
+	exit(1)
+for feature in getKeyValue(noaa_zones_obj, ['features']):
+	noaa_county_list[getKeyValue(feature, ['properties', 'id'])] = getKeyValue(feature, ['properties', 'name']);
+#print(county_list);
+
+#################################################################################
+#                                    L o o p                                    #
+#################################################################################
+
+while True:	
+	
+	#  Start afresh each iteration through this loop
+	output = output_template;
+	
+	#  Get the OpenWeatherMap One Call API data
+	url = 'https://api.openweathermap.org/data/2.5/onecall?lat={}&lon={}&appid={}&units=imperial'.format(latitude, longitude, openweathermap_api_key)
+	openweathermap_obj = getURL(url)
+	if openweathermap_obj is False:
+		time.sleep(5)
+		continue
+	#print(json.dumps(openweathermap_obj, indent=4))
+	
+	#  Populate the output dictionary with the current observations from
+	#  OpenWeatherMap 
+	props = getKeyValue(openweathermap_obj, ['current'])
+	output['currently'] = {
+		'time': getKeyValue(props, ['dt']),
+		'summary': getKeyValue(props, ['weather', 0, 'description'], lambda x: x.capitalize()),
+		'icon': getKeyValue(props, ['weather', 0, 'icon'], lambda x: mapIcons(x)),
+		'temperature': getKeyValue(props, ['temp']),
+		'apparentTemperature': getKeyValue(props, ['feels_like']),
+		'precipIntensity': getKeyValue(props, ['rain', '1h'], lambda x: round(x / 25.4, 2)) if getKeyValue(props, ['rain', '1h']) else getKeyValue(props, ['snow', '1h'], lambda x: round(x / 25.4, 2)),
+		'precipType': getKeyValue(props, ['weather', 0, 'id'], lambda x: mapPrecipType(x)),
+		'dewPoint': getKeyValue(props, ['dew_point']),
+		'humidity': getKeyValue(props, ['humidity'], lambda x: round(x / 100, 2) if x else None),
+		'pressure': getKeyValue(props, ['pressure']),
+		'windSpeed': getKeyValue(props, ['wind_speed']),
+		'windGust': None,
+		'windBearing': getKeyValue(props, ['wind_deg']),
+		'cloudCover': getKeyValue(props, ['clouds'], lambda x: round(x / 100, 2) if x else None),
+		'uvIndex': getKeyValue(props, ['uvi']),
+		'visibility': getKeyValue(props, ['visibility'], lambda x: round(x / 1609.34, 2) if x else None)  # Convert meters to miles
+	}
+	
+	#  Populate the output dictionary with the hourly forecasts from
+	#  OpenWeatherMap
+	hourly_data = []
+	for hour in openweathermap_obj['hourly']:
+		hourly_data.append({
+			'time': getKeyValue(hour, ['dt']),
+			'summary': getKeyValue(hour, ['weather', 0, 'description'], lambda x: x.capitalize()),
+			'icon': getKeyValue(hour, ['weather', 0, 'icon'], lambda x: mapIcons(x)),
+			'precipProbability': None,
+			'precipIntensity': getKeyValue(hour, ['rain', '1h'], lambda x: round(x / 25.4, 2)) if getKeyValue(hour, ['rain', '1h']) else getKeyValue(hour, ['snow', '1h'], lambda x: round(x / 25.4, 2)),
+			'precipType': getKeyValue(hour, ['weather', 0, 'id'], lambda x: mapPrecipType(x)),
+			'temperature': getKeyValue(hour, ['temp']),
+			'apparentTemperature': getKeyValue(hour, ['feels_like']),
+			'dewPoint': getKeyValue(hour, ['dew_point']),
+			'humidity': getKeyValue(hour,['humidity'], lambda x: round(x / 100, 2)),
+			'pressure': getKeyValue(hour, ['pressure']),
+			'windSpeed': getKeyValue(hour, ['wind_speed']),
+			'windGust': None,
+			'windBearing': getKeyValue(hour, ['wind_deg']),
+			'cloudCover': getKeyValue(hour,['clouds'], lambda x: round(x / 100, 2))
+		})
+	
+	#  Get NOAA's hourly weather data
+	url = getKeyValue(noaa_points_obj, ['properties', 'forecastGridData']);
+	noaa_griddata_obj = getURL(url)
+	if noaa_griddata_obj is False:
+		time.sleep(5)
+		continue
+	props = getKeyValue(noaa_griddata_obj, ['properties']);
+	# print(json.dumps(props, indent=4))
+
+	#  Set the hourly precipitation probability percentage using the NOAA
+	#  hourly data
+	for value in getKeyValue(props, ['probabilityOfPrecipitation', 'values']):
+		interval = parseInterval(getKeyValue(value, ['validTime']))
+		timestamp = interval['start']
+		while timestamp < interval['end']:
+			for i in range(len(hourly_data)):
+				if timestamp == hourly_data[i]['time']:
+					hourly_data[i]['precipProbability'] = getKeyValue(value, ['value'], lambda x: round(x / 100, 2))
+					break
+			timestamp = timestamp + 3600
+
+	#  Set miles of visibility.  NOAA only provides 24 hours of this data
+	#  so "visibility" will be null in the second half of the "hourly"
+	#  array.
+	for value in getKeyValue(props, ['visibility', 'values']):
+		interval = parseInterval(getKeyValue(value, ['validTime']))
+		timestamp = interval['start']
+		while timestamp < interval['end']:
+			for i in range(len(hourly_data)):
+				if timestamp == hourly_data[i]['time']:
+					#  This value is in meters, there are 1609.34 meters in a mile
+					hourly_data[i]['visibility'] = 	getKeyValue(value, ['value'], lambda x: round(x / 1609.34, 2))
+					break
+			timestamp = timestamp + 3600
+
+	output['hourly']['data'] = hourly_data
+		
+	#  Populate the output dictionary with the daily forecasts from
+	#  OpenWeatherMap
+	daily_data = []
+	for day in openweathermap_obj['daily']:
+		daily_data.append({
+			'time': getKeyValue(day, ['dt']),
+			'summary': getKeyValue(day, ['weather', 0, 'description'], lambda x: x.capitalize()),
+			'icon': getKeyValue(day, ['weather', 0, 'icon'], lambda x: mapIcons(x)),
+			'sunriseTime': getKeyValue(day, ['sunrise']),
+			'sunsetTime': getKeyValue(day, ['sunset']),
+			'moonPhase': moon_phase(day['dt']),
+			'precipProbability': None,
+			'precipType': getKeyValue(day, ['weather', 0, 'id'], lambda x: mapPrecipType(x)),
+			'temperatureHigh': None,
+			'temperatureHighTime': None,
+			'temperatureLow': None,
+			'temperatureLowTime': None,
+			'apparentTemperatureHigh': None,
+			'apparentTemperatureHighTime': None,
+			'apparentTemperatureLow': None,
+			'apparentTemperatureLowTime': None,
+			'dewPoint': getKeyValue(day, ['dew_point']),
+			'humidity': getKeyValue(day, ['humidity']),
+			'pressure': getKeyValue(day, ['pressure']),
+			'windSpeed': getKeyValue(day, ['wind_speed']),
+			'windGust': None,
+			'windGustTime': None,
+			'windBearing': getKeyValue(day, ['wind_deg']),
+			'cloudCover': getKeyValue(day, ['clouds'], lambda x: round(x /100, 2)),
+			'uvIndex': getKeyValue(day, ['uvi']),
+			'temperatureMin': None,
+			'temperatureMinTime': None,
+			'temperatureMax': None,
+			'temperatureMaxTime': None,
+			'apparentTemperatureMin': None,
+			'apparentTemperatureMinTime': None,
+			'apparentTemperatureMax': None,
+			'apparentTemperatureMaxTime': None
+		})
+
+	#  Fill in missing data using NOAA data from the gridpoint forecast query
+	props = getKeyValue(noaa_griddata_obj, ['properties'])
+	for i in range(len(daily_data)):
+		start = daily_data[i]['time']
+		end = start + (3600 * 24)
+
+		#  Scan through each day's temperature data and get the highs and lows
+		for value in props['temperature']['values']:
+			timestamp = getKeyValue(value, ['validTime'], lambda x: parseInterval(x)['start'])
+			if timestamp >= end:
+				break;
+			temp = getKeyValue(value, ['value'], lambda x: round((x * 9 / 5) + 32, 2));
+			if timestamp >= start and timestamp < end:
+				if not daily_data[i]['temperatureHigh'] or temp > daily_data[i]['temperatureHigh']:
+					daily_data[i]['temperatureHigh'] = temp
+					daily_data[i]['temperatureHighTime'] = timestamp
+					daily_data[i]['temperatureMax'] = temp
+					daily_data[i]['temperatureMaxTime'] = timestamp
+				if not daily_data[i]['temperatureLow'] or temp < daily_data[i]['temperatureLow']:
+					daily_data[i]['temperatureLow'] = temp
+					daily_data[i]['temperatureLowTime'] = timestamp
+					daily_data[i]['temperatureMin'] = temp
+					daily_data[i]['temperatureMinTime'] = timestamp
+		for value in props['apparentTemperature']['values']:
+			timestamp = getKeyValue(value, ['validTime'], lambda x: parseInterval(x)['start'])
+			if timestamp >= end:
+				break;
+			temp = getKeyValue(value, ['value'], lambda x: round((x * 9 / 5) + 32, 2));
+			if timestamp >= start and timestamp < end:
+				if not daily_data[i]['apparentTemperatureHigh'] or temp > daily_data[i]['apparentTemperatureHigh']:
+					daily_data[i]['apparentTemperatureHigh'] = temp
+					daily_data[i]['apparentTemperatureHighTime'] = timestamp
+					daily_data[i]['apparentTemperatureMax'] = temp
+					daily_data[i]['apparentTemperatureMaxTime'] = timestamp
+				if not daily_data[i]['apparentTemperatureLow'] or temp < daily_data[i]['apparentTemperatureLow']:
+					daily_data[i]['apparentTemperatureLow'] = temp
+					daily_data[i]['apparentTemperatureLowTime'] = timestamp
+					daily_data[i]['apparentTemperatureMin'] = temp
+					daily_data[i]['apparentTemperatureMinTime'] = timestamp
+		
+		#  Calculate the average precipitation probability for the day
+		total = 0;
+		total_hours = 0;
+		for value in props['probabilityOfPrecipitation']['values']:
+			interval = parseInterval(getKeyValue(value, ['validTime']))
+			if interval['end'] > start and interval['start'] <= end:
+				if interval['start'] < start:
+					interval['start'] = start
+				if interval['end'] > end:
+					interval['end'] = end
+				hours = (interval['end'] - interval['start']) / 3600;
+				total = total + getKeyValue(value, ['value'], lambda x: x * hours if x else 0);
+				total_hours = total_hours + hours;
+		if total_hours > 0:
+			daily_data[i]['precipProbability'] = round(total / total_hours / 100, 2);
+
+		#  Calculate the average visibility for the day (remember that
+		#  NOAA only provides this data for the first 24 hours (2 days.)
+		total = 0;
+		total_hours = 0;
+		for value in props['visibility']['values']:
+			interval = parseInterval(getKeyValue(value, ['validTime']))
+			if interval['end'] > start and interval['start'] <= end:
+				if interval['start'] < start:
+					interval['start'] = start
+				if interval['end'] > end:
+					interval['end'] = end
+				hours = (interval['end'] - interval['start']) / 3600;
+				total = total + getKeyValue(value, ['value'], lambda x: x * hours if x else 0);
+				total_hours = total_hours + hours;
+		if total_hours > 0:
+			daily_data[i]['visibility'] = round(total / total_hours / 1609.34, 2);
+
+		#  Get the maximum windGust for the day and its associated timestamp
+		for prop in props['windGust']['values']:
+			timestamp = getKeyValue(prop, ['validTime'], lambda x: parseInterval(x)['start']);
+			if timestamp >= end:
+				break
+			value = getKeyValue(prop, ['value'], lambda x: round(x * 2.23694, 2) if x else 0)
+			if timestamp >= start and timestamp < end:
+				if not daily_data[i]['windGust'] or value > daily_data[i]['windGust']:
+					daily_data[i]['windGust'] = value
+					daily_data[i]['windGustTime'] = timestamp
+
+	output['daily']['data'] = daily_data
+
+	#  Ask NOAA for any alerts that pertain to this location and add them
+	#  to the output dictionary.  If there are none, delete the "alerts"
+	#  key from the dictionary.
+	url = 'https://api.weather.gov/alerts?point={},{}'.format(latitude, longitude)
+	noaa_alerts_obj = getURL(url)
+	if noaa_alerts_obj is False:
+		time.sleep(5)
+		continue
+	alerts = getKeyValue(noaa_alerts_obj, ['features'])
+	if alerts:
+		
+		#  Get a list of all the counties in this location's state.
+		url = 'https://api.weather.gov/zones?type=county&area={}'.format(getKeyValue(noaa_points_obj, ['properties', 'relativeLocation', 'properties', 'state']))
+		noaa_zones_obj = getURL(url)
+		if noaa_zones_obj:
+			noaa_county_list = {};
+			for feature in getKeyValue(noaa_zones_obj, ['features']):
+				noaa_county_list[getKeyValue(feature, ['properties', 'id'])] = getKeyValue(feature, ['properties', 'name']);
+
+			#  Append the list of forecast zones to the county list because sometimes
+			#  they use these in alerts instead of county codes
+			url = 'https://api.weather.gov/zones?type=forecast&area={}'.format(getKeyValue(noaa_points_obj, ['properties', 'relativeLocation', 'properties', 'state']))
+			noaa_zones_obj = getURL(url)
+			if noaa_zones_obj:
+				for feature in getKeyValue(noaa_zones_obj, ['features']):
+					noaa_county_list[getKeyValue(feature, ['properties', 'id'])] = getKeyValue(feature, ['properties', 'name']);
+		
+		alert_data = []
+		for alert in alerts:
+			props = getKeyValue(alert, ['properties'])
+			#  Don't include expired alerts
+			if getKeyValue(props, ['expires'], lambda x: parseInterval(x)['start']) > time.time():
+				#  Use the noaa_county_list dictionary we built at the
+				#  beginning to convert the county IDs listed in the
+				#  alert to county names.
+				regions = []
+				if noaa_county_list:
+					for county_id in getKeyValue(props, ['geocode', 'UGC']):
+						regions.append(noaa_county_list[county_id])
+				#  Populate the alert data array with the data from NOAA	
+				alert_data.append({
+					'title': getKeyValue(props, ['event']),
+					'regions': regions,
+					'severity': getKeyValue(props, ['severity']),
+					'time': getKeyValue(props, ['onset'],  lambda x: parseInterval(x)['start']),
+					'expires': getKeyValue(props, ['expires'],  lambda x: parseInterval(x)['start']),
+					'description': getKeyValue(props, ['description'], lambda x: re.sub(r'\s+', ' ', x)),
+					'url': getKeyValue(props,['@id'])
+				})
+		
+		#  Add the alerts data array to the output dictionary	
+		output['alerts'] = alert_data
+
+	#  If there were no alerts then remove the "alerts" key from the 
+	#  output dictionary
+	if len(output['alerts']) == 0:
+		del output['alerts']
+
+	#  Write the dictionary into the output file in JSON format.
+	with open(output_file, 'w') as f:
+		f.write(json.dumps(output, indent=4))
+	
+	#  If not being quiet, write a progress message to let them know
+	#  we're still alive
+	if not opts.quiet:
+		print('{}: Sleeping for {} seconds'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), update_delay))
+	time.sleep(update_delay)

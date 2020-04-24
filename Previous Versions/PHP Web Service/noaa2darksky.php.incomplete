@@ -1,0 +1,655 @@
+<?php
+
+	// This Source Code Form is subject to the terms of the Mozilla Public
+	// License, v. 2.0. If a copy of the MPL was not distributed with this
+	// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+	require('MoonPhase.php');
+	require('VincentyGreatCircleDistance.php');
+	require('weatherAPIkeys.php');
+
+	//  Convert Celsius to Fahrenheit
+	function fahrenheit($degC) {
+		return round(($degC * 9 / 5) + 32);
+	}
+
+	//  Convert m/s to MPH
+	function mph($mps) {
+		return round($mps * 2.23694, 2);
+	}
+	
+	//  Convert metres to miles
+	function m2M($metres) {
+		return round($metres / 1609.34, 2);
+	}
+	
+	//  Map the names of the icons used
+	function mapIcons($icon) {
+
+		// The complete DarkSky icon set:
+		// 		clear-day.png    
+		// 		clear-night.png  
+		// 		cloudy.png  
+		// 		fog.png     
+		// 		partly-cloudy-day.png    
+		// 		partly-cloudy-night.png  
+		// 		rain.png   
+		// 		sleet.png  
+		// 		snow.png
+		// 		wind.png
+
+		preg_match('/\/icons\/[^?]*/', $icon, $matches);
+		$icon = str_replace('/icons', '', $matches[0]);
+		$icon = explode(',', $icon)[0];
+		$icon_list = array(
+			'/land/day/bkn' => 'partly-cloudy-day',
+			'/land/day/few' => 'clear-day',
+			'/land/day/fog' => 'fog',
+			'/land/day/rain_showers' => 'rain',
+			'/land/day/sct' => 'partly-cloudy-day',
+			'/land/day/tsra' => 'rain',
+			'/land/day/wind_bkn' => 'wind',
+			'/land/day/wind_sct' => 'wind',
+			'/land/night/bkn' => 'partly-cloudy-night',
+			'/land/night/few' => 'clear-night',
+			'/land/night/fog' => 'fog',
+			'/land/night/rain_showers' => 'rain',
+			'/land/night/sct' => 'partly-cloudy-night',
+			'/land/night/tsra' => 'rain',
+			'/land/night/wind_bkn' => 'wind',
+			'/land/night/wind_sct' => 'wind',
+		);
+		if ($icon_list[$icon]) {
+			return $icon_list[$icon];
+		} else {
+			return $icon;
+		}
+	}
+	
+	//  Parse the date strings with interval specs that NOAA uses
+	//  and return start and end timestamps for the interval
+	function parseInterval($datestring) {
+		$parts = explode('/', $datestring);
+		$start = new DateTime($parts[0]);
+		$end = new DateTime($parts[0]);
+		if ($parts[1]) {
+			$end->add(new DateInterval($parts[1]));
+		}
+		return array('start' => $start->format('U'), 'end' => $end->format('U'));
+	}
+	
+	//  Calculate the average value of an element from the griddata query
+	//  within a given time period	
+	function calculateGriddataAverage($elements, $start, $end) {
+		$total = 0;
+		$total_hours = 0;
+		foreach($elements as $element) {
+			$interval = parseInterval($element['validTime']);
+			if ($interval['end'] > $start and $interval['start'] <= $end) {
+				if ($interval['start'] < $start) {
+					$interval['start'] = $start;
+				}					
+				if ($interval['end'] > $end) {
+					$interval['end'] = $end;
+				}
+				$hours = ($interval['end'] - $interval['start']) / 3600;
+				$total = $total + ($element['value'] * $hours);
+				$total_hours = $total_hours + $hours;
+			}
+		}
+		if ($total_hours == 0) {
+			return false;
+		} else {
+			return $total / $total_hours;
+		}
+	}
+	
+	//  Get the maximum value for an element from the griddata query
+	//  within a given time period
+	function calculateGriddataMax($elements, $start, $end) {
+		$max = 0;
+		foreach($elements as $element) {
+			$interval = parseInterval($element['validTime']);
+			if ($interval['end'] > $start and $interval['start'] <= $end) {
+				if ($element['value'] > $max) {
+					$max = $element['value'];
+				}
+			}
+		}
+		return $max;
+	}
+	
+	$latitude = 42.925455;
+	$longitude = -85.604557;
+	
+	//  Set up a skeleton array to contain the DarkSky formated output
+	$output = array(
+		'latitude' => $latitude,
+		'longitude' => $longitude,
+		'timezone' => '',
+		'currently' => array(),
+		'minutely' => array(),    // NOAA doesn't provide this, the precipitation 
+		                          // probability and intensity for each minute
+		                          // of the next hour
+		'hourly' => array(),
+		'daily' => array(),
+		'flags' => array(
+			'sources' => array('swspa','cmc','gfs','hrrr','icon','isd','madis','nam','sref','darksky','nearest-precip'),
+			'nearest-station'=> 5000,
+			'units'=> 'us'
+		),
+		'offset' => 0
+	);
+	
+	//  All requests to the NOAA API require this context, including the
+	//  User-Agent header which they treat as a sort of API key.
+	$noaa_opts = array(
+		'http' => array(
+			'method' => "GET",
+			'header' => "User-Agent: " . $noaa_api_key . "\r\nAccept: application/geo+json\r\n"
+		)
+	);
+	$noaa_context = stream_context_create($noaa_opts);
+
+	//  Ask NOAA to give us the gridpoint coordinates corresponding to the
+	//  latitude and longitude that we received from the user
+    $url = 'https://api.weather.gov/points/' . $latitude . ',' . $longitude;
+	if (($response_data = file_get_contents($url, false, $noaa_context)) !== false) {
+		$points_obj = json_decode($response_data, true);
+//		print_r($points_obj);
+	}
+	
+	//  Using the timezone string for this location that we got from the
+	//  NOAA points lookup, calculate the corresponding timezone offset
+	//  value and put it and the timezone string into the output array.
+	$output['timezone'] = $points_obj['properties']['timeZone'];
+	$utc_tz = new DateTimeZone("UTC");
+	$point_tz = new DateTimeZone($output['timezone']);
+	$now = new DateTime("now", $utc_tz);
+	$output['offset'] = $point_tz->getOffset($now) / 3600;
+
+	//  Using the stations URL that we got from the NOAA points lookup,
+	//  find the nearest station and get the current conditions.  Use
+	//  this data to fill in the "currently" section of the output array.
+	$url = $points_obj['properties']['observationStations'];
+	if (($response_data = file_get_contents($url, false, $noaa_context)) !== false) {
+		$stations_obj = json_decode($response_data, true);
+		foreach ($stations_obj['features'] as $feature) {
+			$miles = vincentyGreatCircleDistance($latitude, $longitude, $feature['geometry']['coordinates'][1], $feature['geometry']['coordinates'][0]);
+			if ($miles < $output['flags']['nearest-station']) {
+				$station_url = $feature['id'];
+				$output['flags']['nearest-station'] = $miles;
+			}
+		}
+	}
+	$url = $station_url . '/observations/latest';
+	if (($response_data = file_get_contents($url, false, $noaa_context)) !== false) {
+		$current_obj = json_decode($response_data, true);
+//		print_r($current_obj);
+		$props = $current_obj['properties'];
+		$output['currently'] = array(
+			'time' => strtotime($props['timestamp']),
+			'summary' => $props['textDescription'],
+			'icon' => mapIcons($props['icon']),
+			'nearestStormDistance' => null,
+			'nearestStormBearing' => null,
+			'precipIntensity' => null,
+			'precipProbability' => null,
+			'temperature' => fahrenheit($props['temperature']['value']),
+			'apparentTemperature' => $props['windChill']['value'] ? fahrenheit($props['windChill']['value']) : ($props['heatIndex']['value'] ? fahrenheit($props['heatIndex']['value']) : fahrenheit($props['temperature']['value'])),
+			'dewPoint' => fahrenheit($props['dewpoint']['value']),
+			'humidity' => round($props['relativeHumidity']['value'] / 100, 2),
+			'pressure' => round($props['barometricPressure']['value'] / 100, 1),
+			'windSpeed' => $props['windSpeed']['value'] ? mph($props['windSpeed']['value']) : 0,
+			'windGust' => $props['windGust']['value'] ? mph($props['windGust']['value']) : 0,
+			'windBearing' => $props['windDirection']['value'] ? round($props['windDirection']['value'], 2) : 0,
+			'cloudCover' => null,
+			'uvIndex' => null,
+			'visibility' => m2M($props['visibility']['value']),
+			'ozone' => null
+		);
+	}
+
+	//  Using the gridpoints URL that we got from the NOAA points lookup,
+	//  get the detailed forecast information and populate the "hourly"
+	//  section of the output array.
+	$url = $points_obj['properties']['forecastGridData'];
+	if (($response_data = file_get_contents($url, false, $noaa_context)) !== false) {
+		$griddata_obj = json_decode($response_data, true);
+//		print_r($griddata_obj);
+		$props = $griddata_obj['properties'];
+//		print_r($props);
+
+		//  DarkSky only returns 48 hours worth of hourly data
+		$limit = parseInterval(strftime('%Y-%m-%dT%H:00:00/P2D',time()));
+		
+		//  Create an empty array for the data with an element for each
+		//  hour and populate the time and temperature elements of each
+		//  hour element.
+		$data = array();
+		foreach($props['temperature']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			if ($interval['start'] > $limit['end']) {
+				break;
+			}
+			$current_hour = strtotime(strftime('%Y-%m-%dT%H:00:00',time()));
+			if ($interval['start'] >= $current_hour or $interval['end'] > $current_hour) {
+				if ($interval['start'] < $current_hour) {
+					$timestamp = $current_hour;
+				} else {
+					$timestamp = $interval['start'];
+				}
+				while ($timestamp < $interval['end']) {
+					if ($timestamp > $limit['end']) {
+						break;
+					}
+					$data[] = array(
+						'time' => $timestamp,
+						'summary' => null,
+						'icon' => null,
+						'precipIntensity' => null,
+						'precipProbability' => null,
+						'precipType' => null,
+						'temperature' => fahrenheit($value['value']),
+						'apparentTemperature' => fahrenheit($value['value']),
+						'dewPoint' => null,
+						'humidity' => null,
+						'pressure' => null,
+						'windSpeed' => null,
+						'windGust' => null,
+						'windBearing' => null,
+						'cloudCover' => null,
+						'uvIndex' => null,
+						'visibility' => null,
+						'ozone' => null
+					);
+					$timestamp = $timestamp + 3600;
+				}
+			}
+		}
+
+		//  Set dew point temperatures
+		foreach($props['dewpoint']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['dewPoint'] = fahrenheit($value['value']);
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set relative humidity percentage
+		foreach($props['relativeHumidity']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['humidity'] = $value['value'];
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set apparent temperature
+		foreach($props['apparentTemperature']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['apparentTemperature'] = fahrenheit($value['value']);
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set percent cloud cover
+		foreach($props['skyCover']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['cloudCover'] = $value['value'] / 100;
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set wind direction
+		foreach($props['windDirection']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['windBearing'] = round($value['value'], 2);
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set wind speed
+		foreach($props['windSpeed']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['windSpeed'] = mph($value['value']);
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set wind gust speed
+		foreach($props['windGust']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['windGust'] = mph($value['value']);
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set precipitation probability percentage
+		foreach($props['probabilityOfPrecipitation']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['precipProbability'] = $value['value'] / 100;
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+		
+		//  Set miles of visibility
+		foreach($props['visibility']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['visibility'] = m2M($value['value']);
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+
+		//  Set a weather summary string and a precipitation type name
+		//  based on what's in the "weather" attribute
+		foreach($props['weather']['values'] as $value) {
+			$interval = parseInterval($value['validTime']);
+			$timestamp = $interval['start'];
+			while ($timestamp < $interval['end'] and $timestamp <= $limit['end']) {
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						if ($value['value'][0]['coverage']) {
+							if ($value['value'][0]['coverage'] == 'likely') {
+								$data[$i]['summary'] = preg_replace('/\s\s+/', ' ', str_replace('_', ' ', $value['value'][0]['intensity'] . ' ' . $value['value'][0]['weather'] . ' ' . $value['value'][0]['coverage']));
+							} else {
+								$data[$i]['summary'] = preg_replace('/\s\s+/', ' ', str_replace('_', ' ', $value['value'][0]['coverage'] . ' of ' . $value['value'][0]['intensity'] . ' ' . $value['value'][0]['weather']));
+							}
+						}
+						if ($value['value'][0]['weather']) {
+							$data[$i]['precipType'] = explode('_', $value['value'][0]['weather'])[0];
+						}
+						break;
+					}
+				}
+				$timestamp = $timestamp + 3600;
+			}
+		}
+
+		//  Set the summary and icon values from the NOAA hourly forecast
+		//  query
+		$url = $points_obj['properties']['forecastHourly'];
+		if (($response_data = file_get_contents($url, false, $noaa_context)) !== false) {
+			$hourly_obj = json_decode($response_data, true);
+//			print_r($hourly_obj);
+			foreach($hourly_obj['properties']['periods'] as $hour) {
+				$timestamp = strtotime($hour['startTime']);
+				if ($timestamp > $limit['end']) {
+					break;
+				}
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['summary'] = $hour['shortForecast'];
+						$data[$i]['icon'] = mapIcons($hour['icon']);
+						break;
+					}
+				}
+			}
+		}
+		
+		//  Add the hourly section to the output
+		$output['hourly'] = array(
+			'summary' => null,
+			'icon' => null,
+			'data' => $data
+		);
+
+
+		//  Create the "daily" section of the output with calculated
+		//  timestamp, sunrise, sunset and moon phase values.
+		//  DarkSky returns 8 days worth of daily data
+		$limit = parseInterval(strftime('%Y-%m-%dT00:00:00/P8D',time()));
+		$data = array();
+		$timestamp = strtotime(strftime('%Y-%m-%dT00:00:00',time()));
+		while ($timestamp <= $limit['end']) {
+			$moon = new Solaris\MoonPhase($timestamp);
+			$data[] = array(
+				'time' => $timestamp,
+				'summary' => null,
+				'icon' => null,
+				'sunriseTime' => date_sunrise($timestamp, SUNFUNCS_RET_TIMESTAMP, $latitude, $longitude),
+				'sunsetTime' => date_sunset($timestamp, SUNFUNCS_RET_TIMESTAMP, $latitude, $longitude),
+				'moonPhase' => round($moon->get('illumination'), 2),
+				'precipIntensity' => null,
+				'precipIntensityMax' => null,
+				'precipIntensityMaxTime' => null,
+				'precipProbability' => null,
+				'precipType' => null,
+				'temperatureHigh' => null,
+				'temperatureHighTime' => null,
+				'temperatureLow' => null,
+				'temperatureLowTime' => null,
+				'apparentTemperatureHigh' => null,
+				'apparentTemperatureHighTime' => null,
+				'apparentTemperatureLow' => null,
+				'apparentTemperatureLowTime' => null,
+				'dewPoint' => null,
+				'humidity' => null,
+				'pressure' => null,
+				'windSpeed' => null,
+				'windGust' => null,
+				'windGustTime' => null,
+				'windBearing' => null,
+				'cloudCover' => null,
+				'uvIndex' => null,
+				'uvIndexTime' => null,
+				'visibility' => null,
+				'ozone' => null,
+				'temperatureMin' => null,
+				'temperatureMinTime' => null,
+				'temperatureMax' => null,
+				'temperatureMaxTime' => null,
+				'apparentTemperatureMin' => null,
+				'apparentTemperatureMinTime' => null,
+				'apparentTemperatureMax' => null,
+				'apparentTemperatureMaxTime' => null
+			);
+			$timestamp = $timestamp + (3600 * 24);
+		};
+		
+		//  Scan the results of the griddata query to collect all the
+		//  mins and maxes for the "daily" section of the output.
+		$props = $griddata_obj['properties'];
+		for ($i = 0; $i < count($data); $i++) {
+			$start = $data[$i]['time'];
+			$end = $start + (3600 * 24);
+
+			//  Set the min/max temperatures
+			foreach($props['temperature']['values'] as $prop) {
+				$timestamp = strtotime(explode('/', $prop['validTime'])[0]);
+				if ($timestamp >= $end) {
+					break;
+				}
+				$value = fahrenheit($prop['value']);
+				if ($timestamp >= $start and $timestamp < $end) {
+					if (!$data[$i]['temperatureHigh'] or ($value > $data[$i]['temperatureHigh'])) {
+						$data[$i]['temperatureHigh'] = $value;
+						$data[$i]['temperatureHighTime'] = $timestamp;
+						$data[$i]['temperatureMax'] = $value;
+						$data[$i]['temperatureMaxTime'] = $timestamp;
+					}
+					if (!$data[$i]['temperatureLow'] or ($value < $data[$i]['temperatureLow'])) {
+						$data[$i]['temperatureLow'] = $value;
+						$data[$i]['temperatureLowTime'] = $timestamp;
+						$data[$i]['temperatureMin'] = $value;
+						$data[$i]['temperatureMinTime'] = $timestamp;
+					}
+				}
+			}
+
+			//  Set the min/max apparentTemperatures
+			foreach($props['apparentTemperature']['values'] as $prop) {
+				$timestamp = strtotime(explode('/', $prop['validTime'])[0]);
+				if ($timestamp >= $end) {
+					break;
+				}
+				$value = fahrenheit($prop['value']);
+				if ($timestamp >= $start and $timestamp < $end) {
+					if (!$data[$i]['apparentTemperatureHigh'] or ($value > $data[$i]['apparentTemperatureHigh'])) {
+						$data[$i]['apparentTemperatureHigh'] = $value;
+						$data[$i]['apparentTemperatureHighTime'] = $timestamp;
+						$data[$i]['apparentTemperatureMax'] = $value;
+						$data[$i]['apparentTemperatureMaxTime'] = $timestamp;
+					}
+					if (!$data[$i]['apparentTemperatureLow'] or ($value < $data[$i]['apparentTemperatureLow'])) {
+						$data[$i]['apparentTemperatureLow'] = $value;
+						$data[$i]['apparentTemperatureLowTime'] = $timestamp;
+						$data[$i]['apparentTemperatureMin'] = $value;
+						$data[$i]['apparentTemperatureMinTime'] = $timestamp;
+					}
+				}
+			}
+
+			//  Set the average precipProbability
+			$avg = calculateGriddataAverage($props['probabilityOfPrecipitation']['values'], $start, $end);
+			if ($avg) {
+				$data[$i]['precipProbability'] = round($avg, 2);
+			}
+			
+			//  Set the average dewpoint temperature
+			$avg = calculateGriddataAverage($props['dewpoint']['values'], $start, $end);
+			if ($avg) {
+				$data[$i]['dewPoint'] = fahrenheit($avg);
+			}
+			
+			//  Set the average humidity
+			$avg = calculateGriddataAverage($props['relativeHumidity']['values'], $start, $end);
+			if ($avg) {
+				$data[$i]['humidity'] = round($avg / 100, 2);
+			}
+			
+			//  Set the maximum windSpeed
+			$max = calculateGriddataMax($props['windSpeed']['values'], $start, $end);
+			$data[$i]['windSpeed'] = mph($max);
+			
+			//  Set the maximum windGust and the asscoiated timestamp
+			foreach($props['windGust']['values'] as $prop) {
+				$timestamp = strtotime(explode('/', $prop['validTime'])[0]);
+				if ($timestamp >= $end) {
+					break;
+				}
+				$value = mph($prop['value']);
+				if ($timestamp >= $start and $timestamp < $end) {
+					if (!$data[$i]['windGust'] or ($value > $data[$i]['windGust'])) {
+						$data[$i]['windGust'] = $value;
+						$data[$i]['windGustTime'] = $timestamp;
+					}
+				}
+			}
+			
+			//  Set the average windBearing
+			$avg = calculateGriddataAverage($props['windDirection']['values'], $start, $end);
+			if ($avg) {
+				$data[$i]['windBearing'] = round($avg);
+			}
+			
+			//  Set the average cloudCover
+			$avg = calculateGriddataAverage($props['skyCover']['values'], $start, $end);
+			if ($avg) {
+				$data[$i]['cloudCover'] = round($avg / 100, 2);
+			}
+			
+			//  Set the average visibility (NOAA only provides 2 days of data)
+			$avg = calculateGriddataAverage($props['visibility']['values'], $start, $end);
+			if ($avg) {
+				$data[$i]['visibility'] = m2M($avg);
+			}
+
+		}
+				 
+		//  Set the summary and icon values from the NOAA daily forecast
+		//  query
+		$url = $points_obj['properties']['forecastGridData'] . '/forecast';
+		if (($response_data = file_get_contents($url, false, $noaa_context)) !== false) {
+			$daily_obj = json_decode($response_data, true);
+//				print_r($daily_obj);
+			foreach($daily_obj['properties']['periods'] as $period) {
+				$timestamp = strtotime(strftime('%Y-%m-%dT00:00:00', strtotime($period['startTime'])));
+				if ($timestamp > $limit['end']) {
+					break;
+				}
+				for ($i = 0; $i < count($data); $i++) {
+					if ($timestamp == $data[$i]['time']) {
+						$data[$i]['summary'] = ucfirst(strtolower($period['shortForecast']));
+						$data[$i]['icon'] = mapIcons($hour['icon']);
+						break;
+					}
+				}
+			}
+		}
+		
+		$output['daily'] = array(
+			'summary' => null,
+			'icon' => null,
+			'data' => $data
+		);
+
+	}
+
+
+	print_r(json_encode($output, JSON_PRETTY_PRINT));
+//	print_r(json_decode(json_encode($output)));
+
+?>
