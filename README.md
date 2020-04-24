@@ -55,7 +55,7 @@ When I'm finished:
 
 The application will log messages into a darksky-api.log file in the current directory.  It will also write some messages to the development console.
 
-The Flask documentation discusses the many options for deploying a Flask application in production.  I use the uwsgi service on CentOS 8.  This repository includes the ini configuration files that I use for this purpose.
+The [Flask documentation](https://flask.palletsprojects.com/en/1.1.x/deploying/#deployment) discusses the many options for deploying a Flask application in production.  I use the uWSGI service on CentOS 8.  This repository includes the ini configuration files that I use for this purpose.
 
 ###License
 
