@@ -12,8 +12,9 @@ Set up a directory structure on the host where you will run the application:
          │       └── favicon.ico
          ├── darksky-api.service
          ├── Dockerfile
-         └── uwsgi.d
-             └── darksky-api.ini
+         ├── uwsgi.d
+         │     └── darksky-api.ini
+         └── weather.conf
 
 Use the Dockerfile to create a uWSGI container on the host where you will run the application:
 
@@ -33,6 +34,20 @@ uWSGI writes its console log output into the /opt/uwsgi/darksky-api/uwsgi.log fi
 
 When updates are made to the application's code, the new files can be copied into place in the directory structure shown above while the application continues to run.  Use the `touch /opt/uwsgi/uwsgi.d/darksky-api.ini` command to make uwsgi reload the application code and pick up the changes.
 
+## Reverse Proxy With Apache Web Server
+
+With the web service running on port 5080 I wanted a name-based virtual server running on port 80 under the Apache HTTP server that would proxy requests through to the web service.
+
+1. Create a DNS CNAME entry for the web server hostname that you want to use.
+2. Edit the /opt/uwsgi/weather.conf file to set IP addresses used in the ProxyPass directives to be the address of the uWSGI container host and to set the ServerName directive to match the CNAME record.
+3. Then: 
+```
+      $ sudo dnf install httpd
+      $ sudo cp /opt/uwsgi/weather.conf /etc/httpd/conf.d/
+      $ sudo systemctl enable httpd
+      $ sudo systemctl start httpd
+```
+    
 ## Useful podman commands
 
     sudo podman build -t darksky-api -f /opt/darksky-api/Dockerfile
