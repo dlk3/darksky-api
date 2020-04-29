@@ -19,17 +19,17 @@ Use the Dockerfile to create a uWSGI container on the host where you will run th
 
     sudo podman build -t darksky-api -f /opt/uwsgi/Dockerfile
     
-Copy /opt/uwsgi/darksky-api.service to /etc/systemd/system/darksky-api.service and
+Modify the --volume and --publish options in the ExecStart line in the /opt/uwsgi/darksky-api.service file to reflect your configuration choices.  Copy that file to /etc/systemd/system/darksky-api.service and:
  
     $ sudo systemctl daemon-reload
     $ sudo systemctl enable darksky-api.service
     $ sudo systemctl start darksky-api.service
     
-The service will accept requests on the ports mapped in the podman command line in darksky-api.service.  Port 5080 is the HTTP port for weather API calls.  Port 9191 is the Flask application's status port.  You should only  allow outside access to the HTTP port.  Port 9191 can be accessed locally from the podman container's host to monitor the application.
+The service will accept requests on the ports mapped in the podman command line in darksky-api.service.  Port 5080 is the HTTP port for weather API calls.  Port 9191 is the Flask application's status port.  You should only allow outside access to the HTTP port.  Port 9191 can be accessed locally from the podman container's host to monitor the application.
  
-The service writes log file output to /opt/uwsgi/darksky-api/darksky-api.log.  This includes elapsed time to respond to each API call it receives, error information, and information about weather icon images it was not able to handle properly, i.e., that are not defined properly in the icon mapping functions in the app.
+The web service writes log file output to /opt/uwsgi/darksky-api/darksky-api.log.  This includes elapsed time to respond to each API call it receives, error information, and information about weather icon images it was not able to handle properly, i.e., that are not defined properly in the icon mapping functions in the app.
  
-uWSGI writes console log output into the /opt/uwsgi/darksky-api/uwsgi.log file. 
+uWSGI writes its console log output into the /opt/uwsgi/darksky-api/uwsgi.log file. 
 
 When updates are made to the application's code, the new files can be copied into place in the directory structure shown above while the application continues to run.  Use the `touch /opt/uwsgi/uwsgi.d/darksky-api.ini` command to make uwsgi reload the application code and pick up the changes.
 

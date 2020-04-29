@@ -4,8 +4,8 @@ Description=Running the darksky-api weather web service in a podman container
 [Service]
 Restart=on-failure
 ExecStartPre=/usr/bin/rm -f %t/%n-pid %t/%n-cid
-ExecStart=/usr/bin/podman run --detach --name=darksky-api --volume=/opt/uwsgi/darksky-api:/opt/uwsgi --volume=/opt/uwsgi/uwsgi.d:/etc/uwsgi.d --publish=5080:5080/tcp --publish=9191:9191/tcp --conmon-pidfile %t/%n-pid --cidfile %t/%n-cid darksky-api:latest
-ExecStop=/usr/bin/sh -c "/usr/bin/podman rm -f `cat %t/%n-cid`"
+ExecStart=/usr/bin/podman run --detach --rm --name=darksky-api --volume=/opt/uwsgi/darksky-api:/opt/uwsgi --volume=/opt/uwsgi/uwsgi.d:/etc/uwsgi.d --publish=5080:5080/tcp --publish=9191:9191/tcp --conmon-pidfile %t/%n-pid --cidfile %t/%n-cid darksky-api:latest
+ExecStop=/usr/bin/sh -c "/usr/bin/podman stop --cidfile %t/%n-cid"
 KillMode=none
 Type=forking
 PIDFile=%t/%n-pid
