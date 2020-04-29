@@ -373,7 +373,7 @@ def get(latitude, longitude, apikey, input_dictionary=None, flask_app=None):
 			daily_data = []
 			d = datetime.datetime.utcnow()
 			timestamp = int(datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=datetime.timezone.utc).timestamp())
-			for timestamp in range(timestamp + (timestamp + (86400 * 8)), 86400):
+			for timestamp in range(timestamp, timestamp + (86400 * 8), 86400):
 				daily_data.append({
 					'time': int(timestamp)
 				})
